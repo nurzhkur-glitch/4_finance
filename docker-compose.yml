@@ -1,0 +1,27 @@
+# Stack: nginx (static + /api + /ws) + FastAPI. Bind HTTP on host port 8080.
+# Put TLS in front: Caddy or nginx on the host (see deploy/Caddyfile.example).
+
+# Create `.env` next to this file: DATABASE_URL, CORS_ORIGINS, HTTP_PORT (see deploy/README.md)
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

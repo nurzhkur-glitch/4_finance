@@ -1,0 +1,17 @@
+# Optional: run API on the host without Docker (nginx still serves frontend separately).
+# Copy to /etc/systemd/system/finance-api.service, adjust paths and User=.
+
+[Unit]
+Description=Finance Dashboard FastAPI
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/4_finance/backend
+EnvironmentFile=/opt/4_finance/backend/.env
+ExecStart=/opt/4_finance/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

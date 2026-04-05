@@ -1,0 +1,6 @@
+# Install Caddy on the VPS, replace finance.example.com, point DNS A-record to this server.
+# Proxy to Docker Compose web service (maps host 8080 -> container 80).
+
+finance.example.com {
+    reverse_proxy localhost:8080
+}
