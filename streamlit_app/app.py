@@ -1,36 +1,58 @@
 """
-Finance dashboard (Streamlit) — calls deployed FastAPI over HTTPS.
-Streamlit Community Cloud: set Secrets API_BASE_URL = https://your-api.example.com
-Local: export STREAMLIT_API_BASE_URL=http://127.0.0.1:8000
+Финансовый дашборд — standalone Streamlit приложение.
+
+Источники данных (проверяются по порядку):
+  1. DATABASE_URL  в secrets → прямое подключение к PostgreSQL
+  2. API_BASE_URL  в secrets → FastAPI backend
+  3. Demo-режим (автоматически, без настроек)
+
+Streamlit Community Cloud:
+  Secrets → добавить DATABASE_URL = "postgresql://..." или API_BASE_URL = "https://..."
+Локально:
+  export DATABASE_URL=postgresql://user:pass@host:5432/db
+  streamlit run app.py
 """
 
 from __future__ import annotations
 
 import os
+import random
 from typing import Any
 
 import pandas as pd
-import requests
 import streamlit as st
 
+# ── Константы ────────────────────────────────────────────────────────────────
 ALL_MONTHS = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
 MONTH_SHORT = {
     "January": "Янв", "February": "Фев", "March": "Мар", "April": "Апр",
-    "May": "Май", "June": "Июн", "July": "Июл", "August": "Авг",
+    "May": "Май",     "June": "Июн",     "July": "Июл",  "August": "Авг",
     "September": "Сен", "October": "Окт", "November": "Ноя", "December": "Дек",
 }
+MONTH_IDX = {m: i for i, m in enumerate(ALL_MONTHS)}
 
-# Same mapping as frontend/src/FinanceDashboard.jsx (PROJECT_GROUPS)
+MONTH_ORDER_SQL = """
+    CASE {col}
+        WHEN 'January'   THEN 1  WHEN 'February'  THEN 2
+        WHEN 'March'     THEN 3  WHEN 'April'     THEN 4
+        WHEN 'May'       THEN 5  WHEN 'June'      THEN 6
+        WHEN 'July'      THEN 7  WHEN 'August'    THEN 8
+        WHEN 'September' THEN 9  WHEN 'October'   THEN 10
+        WHEN 'November'  THEN 11 WHEN 'December'  THEN 12
+        ELSE 99
+    END
+"""
+
 PROJECT_GROUPS: dict[str, list[str]] = {
-    "L'amour": ["L'amour", "L'amour KASPI", "Ком. магазин", "Ком магазин"],
+    "L'amour":     ["L'amour", "L'amour KASPI", "Ком. магазин", "Ком магазин"],
     "L'amour NEW": ["L'amour NEW"],
-    "ReTech": ["ReTech", "Склад товаров"],
-    "Аренда": ["Rent", "Service"],
+    "ReTech":      ["ReTech", "Склад товаров"],
+    "Аренда":      ["Rent", "Service"],
     "Бухгалтерия": ["Касса бухгалтерии"],
-    "Инвестиции": ["Сейф"],
+    "Инвестиции":  ["Сейф"],
     "Ломбард": [
         "Айнабулак", "Алмагуль", "Аксай", "Арена", "Арыстан",
         "Мира", "Самал", "Саяхат", "Сатпаева", "Шолохова", "Шугыла",
@@ -43,68 +65,61 @@ PROJECT_GROUPS: dict[str, list[str]] = {
     ],
 }
 PROJECT_ORDER = [
-    "L'amour", "L'amour NEW", "ReTech", "Аренда", "Бухгалтерия",
-    "Инвестиции", "Ломбард", "СПП",
+    "L'amour", "L'amour NEW", "ReTech", "Аренда",
+    "Бухгалтерия", "Инвестиции", "Ломбард", "СПП",
 ]
 
-ASSET_KEYS = [
-    "total_assets", "store_lombard_assets", "lombard_assets", "store_assets", "cash",
-]
-FLOW_KEYS = [
-    "total_income", "lombard_income", "store_income", "other_income", "expenses", "profit",
-]
-ROW_NUMERIC_KEYS = ASSET_KEYS + FLOW_KEYS
+ASSET_KEYS = ["total_assets", "store_lombard_assets", "lombard_assets", "store_assets", "cash"]
+FLOW_KEYS  = ["total_income", "lombard_income", "store_income", "other_income", "expenses", "profit"]
+ROW_KEYS   = ASSET_KEYS + FLOW_KEYS
+
+ANALYTICS_TABLE = "unpacked_smart_lombard_analytic_data"
+
+_VAL = "COALESCE(d.value, 0::numeric)"
+FINANCE_ROWS_SQL = f"""
+    SELECT
+        NULLIF(trim(SPLIT_PART(d.date, ' ', 1)), '')::int AS year,
+        CASE trim(SPLIT_PART(d.date, ' ', 2))
+            WHEN 'Январь'   THEN 'January'   WHEN 'Февраль'  THEN 'February'
+            WHEN 'Март'     THEN 'March'     WHEN 'Апрель'   THEN 'April'
+            WHEN 'Май'      THEN 'May'       WHEN 'Июнь'     THEN 'June'
+            WHEN 'Июль'     THEN 'July'      WHEN 'Август'   THEN 'August'
+            WHEN 'Сентябрь' THEN 'September' WHEN 'Октябрь'  THEN 'October'
+            WHEN 'Ноябрь'   THEN 'November'  WHEN 'Декабрь'  THEN 'December'
+            ELSE trim(SPLIT_PART(d.date, ' ', 2))
+        END AS month,
+        COALESCE(NULLIF(trim(d.branch::text), ''), '(без филиала)') AS location,
+        COALESCE(SUM(CASE WHEN d.metric = 'assets_general'  THEN {_VAL} ELSE 0 END), 0)::bigint AS total_assets,
+        COALESCE(SUM(CASE WHEN d.metric = 'assets_lombard'  THEN {_VAL} ELSE 0 END), 0)::bigint AS lombard_assets,
+        COALESCE(SUM(CASE WHEN d.metric = 'assets_com_shop' THEN {_VAL} ELSE 0 END), 0)::bigint AS store_assets,
+        (
+            COALESCE(SUM(CASE WHEN d.metric = 'assets_general'  THEN {_VAL} ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN d.metric = 'assets_lombard'  THEN {_VAL} ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN d.metric = 'assets_com_shop' THEN {_VAL} ELSE 0 END), 0)
+        )::bigint AS cash,
+        (
+            COALESCE(SUM(CASE WHEN d.metric = 'assets_lombard'  THEN {_VAL} ELSE 0 END), 0)
+            + COALESCE(SUM(CASE WHEN d.metric = 'assets_com_shop' THEN {_VAL} ELSE 0 END), 0)
+        )::bigint AS store_lombard_assets,
+        COALESCE(SUM(CASE WHEN d.metric = 'profit_general'  THEN {_VAL} ELSE 0 END), 0)::bigint AS total_income,
+        COALESCE(SUM(CASE WHEN d.metric = 'profit_lombard'  THEN {_VAL} ELSE 0 END), 0)::bigint AS lombard_income,
+        COALESCE(SUM(CASE WHEN d.metric = 'profit_com_shop' THEN {_VAL} ELSE 0 END), 0)::bigint AS store_income,
+        (
+            COALESCE(SUM(CASE WHEN d.metric = 'profit_general'  THEN {_VAL} ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN d.metric = 'profit_lombard'  THEN {_VAL} ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN d.metric = 'profit_com_shop' THEN {_VAL} ELSE 0 END), 0)
+        )::bigint AS other_income,
+        (
+            COALESCE(SUM(CASE WHEN d.metric = 'profit_general' THEN {_VAL} ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN d.metric = 'profit_clean'  THEN {_VAL} ELSE 0 END), 0)
+        )::bigint AS expenses,
+        COALESCE(SUM(CASE WHEN d.metric = 'profit_clean' THEN {_VAL} ELSE 0 END), 0)::bigint AS profit
+    FROM {ANALYTICS_TABLE} d
+    GROUP BY d.date, d.branch
+"""
 
 
-def normalize_branch_key(s: str) -> str:
-    if not s or not isinstance(s, str):
-        return ""
-    t = s.strip()
-    for old, new in (
-        ("\u2018", "'"),
-        ("\u2019", "'"),
-        ("\u02bc", "'"),
-        ("`", "'"),
-    ):
-        t = t.replace(old, new)
-    return t
-
-
-def location_matches_pattern(pattern: str, loc: str) -> bool:
-    np = normalize_branch_key(pattern)
-    nl = normalize_branch_key(loc)
-    if nl == np:
-        return True
-    if nl.lower() == np.lower():
-        return True
-    id_prefix = f"{np} ID-"
-    if len(nl) >= len(id_prefix) and nl[: len(id_prefix)].lower() == id_prefix.lower():
-        return True
-    return False
-
-
-def expand_project_to_locations(project_name: str, all_locations: list[str]) -> set[str]:
-    out: set[str] = set()
-    for pat in PROJECT_GROUPS.get(project_name, []):
-        for loc in all_locations:
-            if location_matches_pattern(pat, loc):
-                out.add(loc)
-    return out
-
-
-def api_base_url() -> str:
-    env = os.environ.get("STREAMLIT_API_BASE_URL", "").strip()
-    if env:
-        return env.rstrip("/")
-    try:
-        v = st.secrets["API_BASE_URL"]
-        if v:
-            return str(v).strip().rstrip("/")
-    except Exception:
-        pass
-    return "http://127.0.0.1:8000"
-
-
+# ── Утилиты ───────────────────────────────────────────────────────────────────
 def _num(x: Any) -> float:
     try:
         return float(x) if x is not None else 0.0
@@ -112,223 +127,459 @@ def _num(x: Any) -> float:
         return 0.0
 
 
-def collapse_by_month(rows: list[dict], selected_locations: list[str]) -> list[dict]:
-    if selected_locations:
-        locset = set(selected_locations)
-        rows = [r for r in rows if r.get("location") and r["location"] in locset]
-    acc: dict[tuple[Any, str], dict[str, Any]] = {}
+def fmt_kzt(n: float, decimals: int = 1) -> str:
+    sign = "-" if n < 0 else ""
+    x = abs(n)
+    if x >= 1e9:
+        return f"{sign}{x/1e9:.{decimals}f} млрд ₸"
+    if x >= 1e6:
+        return f"{sign}{x/1e6:.{decimals}f} млн ₸"
+    if x >= 1e3:
+        return f"{sign}{x/1e3:.0f} тыс ₸"
+    return f"{sign}{x:,.0f} ₸"
+
+
+def normalize_key(s: str) -> str:
+    if not s:
+        return ""
+    for old, new in (("\u2018", "'"), ("\u2019", "'"), ("\u02bc", "'"), ("`", "'")):
+        s = s.replace(old, new)
+    return s.strip()
+
+
+def loc_matches(pattern: str, loc: str) -> bool:
+    np_, nl = normalize_key(pattern).lower(), normalize_key(loc).lower()
+    return nl == np_ or nl.startswith(f"{np_} id-")
+
+
+def expand_project(project: str, all_locs: list[str]) -> set[str]:
+    return {
+        loc
+        for pat in PROJECT_GROUPS.get(project, [])
+        for loc in all_locs
+        if loc_matches(pat, loc)
+    }
+
+
+def collapse_by_month(rows: list[dict], sel_locs: list[str]) -> list[dict]:
+    """Агрегирует строки по (year, month), фильтруя по sel_locs если задано."""
+    if sel_locs:
+        locset = set(sel_locs)
+        rows = [r for r in rows if r.get("location") in locset]
+    acc: dict[tuple, dict] = {}
     for d in rows:
         y, m = d.get("year"), d.get("month")
         if y is None or m is None:
             continue
         k = (y, m)
         if k not in acc:
-            acc[k] = {"year": y, "month": m, **{x: 0.0 for x in ROW_NUMERIC_KEYS}}
+            acc[k] = {"year": y, "month": m, **{x: 0.0 for x in ROW_KEYS}}
         o = acc[k]
-        for key in ROW_NUMERIC_KEYS:
+        for key in ROW_KEYS:
             o[key] += _num(d.get(key))
-    out = []
-    for o in acc.values():
+    out = list(acc.values())
+    for o in out:
         ti = o["total_income"]
-        o["profit_pct"] = round((o["profit"] / ti * 100), 1) if ti > 0 else 0.0
-        out.append(o)
-    mi = {m: i for i, m in enumerate(ALL_MONTHS)}
-    out.sort(key=lambda r: (-int(r["year"]), mi.get(r["month"], 99)))
+        o["profit_pct"] = round(o["profit"] / ti * 100, 1) if ti > 0 else 0.0
+    # Хронологический порядок: Янв → Дек, старые годы первыми
+    out.sort(key=lambda r: (int(r["year"]), MONTH_IDX.get(r["month"], 99)))
     return out
 
 
-def aggregate(filtered: list[dict]) -> dict[str, Any]:
-    if not filtered:
-        return {k: 0 for k in ROW_NUMERIC_KEYS} | {"profit_pct": 0.0}
-    n = len(filtered)
+def aggregate(rows: list[dict]) -> dict[str, Any]:
+    if not rows:
+        return {k: 0 for k in ROW_KEYS} | {"profit_pct": 0.0}
+    n = len(rows)
     res: dict[str, Any] = {}
     for k in FLOW_KEYS:
-        res[k] = sum(_num(d.get(k)) for d in filtered)
+        res[k] = sum(_num(d.get(k)) for d in rows)
     for k in ASSET_KEYS:
-        res[k] = round(sum(_num(d.get(k)) for d in filtered) / n)
+        res[k] = round(sum(_num(d.get(k)) for d in rows) / n)
     ti = res["total_income"]
-    res["profit_pct"] = round((res["profit"] / ti * 100), 1) if ti > 0 else 0.0
+    res["profit_pct"] = round(res["profit"] / ti * 100, 1) if ti > 0 else 0.0
     return res
 
 
-def fmt_kzt(n: float) -> str:
-    x = abs(n)
-    if x >= 1e9:
-        return f"{n / 1e9:.1f} млрд"
-    if x >= 1e6:
-        return f"{n / 1e6:.1f} млн"
-    if x >= 1e3:
-        return f"{n / 1e3:.0f} тыс"
-    return f"{n:,.0f}".replace(",", " ")
+# ── Источники данных ──────────────────────────────────────────────────────────
+def _secret(key: str) -> str:
+    val = os.environ.get(key, "").strip()
+    if val:
+        return val
+    try:
+        v = st.secrets.get(key, "")
+        return str(v).strip() if v else ""
+    except Exception:
+        return ""
 
 
+# ---------- Прямой PostgreSQL ----------
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_filters(base: str) -> dict[str, Any]:
+def _db_query(db_url: str, sql: str, params: tuple = ()) -> list[dict]:
+    import psycopg2
+    import psycopg2.extras
+    with psycopg2.connect(db_url) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def db_get_filters(db_url: str) -> dict:
+    years = _db_query(
+        db_url,
+        f"SELECT DISTINCT year FROM ({FINANCE_ROWS_SQL}) fr ORDER BY year",
+    )
+    months = _db_query(
+        db_url,
+        f"""
+        SELECT month FROM (SELECT DISTINCT month FROM ({FINANCE_ROWS_SQL}) fr) t
+        ORDER BY {MONTH_ORDER_SQL.format(col='t.month')}
+        """,
+    )
+    locs = _db_query(
+        db_url,
+        f"SELECT DISTINCT location FROM ({FINANCE_ROWS_SQL}) fr ORDER BY location",
+    )
+    return {
+        "years":     [r["year"]     for r in years],
+        "months":    [r["month"]    for r in months],
+        "locations": [r["location"] for r in locs],
+    }
+
+
+def db_get_monthly(db_url: str, years: tuple[int, ...]) -> list[dict]:
+    if not years:
+        return []
+    ph = ", ".join(["%s"] * len(years))
+    return _db_query(
+        db_url,
+        f"SELECT * FROM ({FINANCE_ROWS_SQL}) fr WHERE fr.year IN ({ph})",
+        params=years,
+    )
+
+
+# ---------- FastAPI backend ----------
+@st.cache_data(ttl=120, show_spinner=False)
+def api_get_filters(base: str) -> dict:
+    import requests
     r = requests.get(f"{base}/api/filters", timeout=60)
     r.raise_for_status()
     return r.json()
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_monthly_for_years(base: str, years_key: tuple[int, ...]) -> list[dict]:
+def api_get_monthly(base: str, years: tuple[int, ...]) -> list[dict]:
+    import requests
     rows: list[dict] = []
-    for y in years_key:
+    for y in years:
         r = requests.get(f"{base}/api/monthly-summary", params={"year": y}, timeout=120)
         r.raise_for_status()
-        data = r.json().get("data") or []
-        rows.extend(data)
+        rows.extend(r.json().get("data") or [])
     return rows
 
 
-def months_present_in_rows(rows: list[dict]) -> list[str]:
-    seen: set[str] = set()
-    for r in rows:
-        m = r.get("month")
-        if m:
-            seen.add(str(m))
-    mi = {m: i for i, m in enumerate(ALL_MONTHS)}
-    return sorted(seen, key=lambda m: mi.get(m, 99))
+# ---------- Demo-режим ----------
+@st.cache_data(show_spinner=False)
+def _demo_data() -> list[dict]:
+    rng = random.Random(42)
+    locs = ["Kaspi L'amour", "Айнабулак", "Аксай СПП", "Арена"]
+    weights = [0.32, 0.28, 0.22, 0.18]
+    rows: list[dict] = []
+    for year in [2024, 2025, 2026]:
+        for i in range(12 if year < 2026 else 3):
+            month = ALL_MONTHS[i]
+            base_income = rng.randint(230_000_000, 320_000_000)
+            total_assets = rng.randint(1_500_000_000, 1_900_000_000)
+            for bi, loc in enumerate(locs):
+                w = weights[bi]
+                bi_income = int(base_income * w)
+                li = int(bi_income * rng.uniform(0.65, 0.75))
+                si = int(bi_income * rng.uniform(0.22, 0.30))
+                exp = int(bi_income * rng.uniform(0.50, 0.65))
+                profit = bi_income - exp
+                ta = int(total_assets * w)
+                la = int(ta * rng.uniform(0.82, 0.92))
+                sa = int(ta * rng.uniform(0.05, 0.10))
+                rows.append({
+                    "year": year, "month": month, "location": loc,
+                    "total_assets": ta, "lombard_assets": la, "store_assets": sa,
+                    "store_lombard_assets": la + sa, "cash": ta - la - sa,
+                    "total_income": bi_income, "lombard_income": li,
+                    "store_income": si, "other_income": bi_income - li - si,
+                    "expenses": exp, "profit": profit,
+                    "profit_pct": round(profit / bi_income * 100, 1) if bi_income else 0,
+                })
+    return rows
 
 
-def month_label_ru(m: str) -> str:
-    return MONTH_SHORT.get(m, m)
+def demo_get_filters() -> dict:
+    rows = _demo_data()
+    return {
+        "years":     sorted({r["year"]     for r in rows}),
+        "months":    ALL_MONTHS,
+        "locations": sorted({r["location"] for r in rows}),
+    }
 
 
-st.set_page_config(page_title="Финансы — Streamlit", layout="wide")
-st.title("Финансовый дашборд")
+# ══════════════════════════════════════════════════════════════════════════════
+# Основное приложение
+# ══════════════════════════════════════════════════════════════════════════════
+st.set_page_config(
+    page_title="Финансовый дашборд",
+    layout="wide",
+    page_icon="📊",
+    initial_sidebar_state="expanded",
+)
+st.title("📊 Финансовый дашборд")
 
-base = api_base_url()
+db_url  = _secret("DATABASE_URL")
+api_url = (_secret("API_BASE_URL") or _secret("STREAMLIT_API_BASE_URL")).rstrip("/")
 
-try:
-    filters = fetch_filters(base)
-except requests.RequestException as e:
-    st.error(f"Не удалось загрузить /api/filters: {e}")
-    st.stop()
+if db_url:
+    MODE = "db"
+elif api_url:
+    MODE = "api"
+else:
+    MODE = "demo"
 
-years = filters.get("years") or []
-locations = filters.get("locations") or []
-months_all = filters.get("months") or ALL_MONTHS
-
-if not years:
-    st.warning("Нет годов в ответе API.")
-    st.stop()
-
-if "months_ms" not in st.session_state:
-    st.session_state["months_ms"] = []
-if "branches_ms" not in st.session_state:
-    st.session_state["branches_ms"] = []
-
+# ── Боковая панель ─────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.subheader("Данные")
-    if st.button("Обновить данные", type="primary", use_container_width=True):
+    st.subheader("⚙️ Данные")
+
+    if MODE == "db":
+        st.success("PostgreSQL — прямое подключение")
+    elif MODE == "api":
+        st.success(f"FastAPI backend")
+        st.caption(api_url)
+    else:
+        st.info("Demo-режим: реальная БД не подключена")
+        with st.expander("Как подключить?"):
+            st.markdown(
+                "Добавьте в **Secrets** (Streamlit Cloud → ⋮ → Settings → Secrets):\n\n"
+                "```toml\n"
+                "# Прямой PostgreSQL (рекомендуется):\n"
+                'DATABASE_URL = "postgresql://user:pass@host:5432/db"\n\n'
+                "# Или FastAPI backend:\n"
+                'API_BASE_URL = "https://your-api.example.com"\n'
+                "```"
+            )
+
+    if st.button("🔄 Обновить данные", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    st.caption("База API")
-    st.code(base, language="text")
-    st.divider()
-    st.subheader("Фильтры")
 
-    default_years = [max(years)] if years else []
-    sel_years = st.multiselect("Годы", options=sorted(years), default=default_years, key="years_ms")
+    st.divider()
+    st.subheader("🔽 Фильтры")
+
+    # Загрузка фильтров
+    try:
+        if MODE == "db":
+            filters = db_get_filters(db_url)
+        elif MODE == "api":
+            filters = api_get_filters(api_url)
+        else:
+            filters = demo_get_filters()
+    except Exception as e:
+        st.error(f"Ошибка загрузки фильтров: {e}")
+        st.stop()
+
+    years_avail    = filters.get("years")     or []
+    locations_avail = filters.get("locations") or []
+
+    if not years_avail:
+        st.warning("Нет доступных годов в базе.")
+        st.stop()
+
+    sel_years = st.multiselect(
+        "Годы",
+        sorted(years_avail),
+        default=[max(years_avail)],
+        key="years_ms",
+    )
     if not sel_years:
         st.warning("Выберите хотя бы один год.")
         st.stop()
 
+    # Загрузка данных за выбранные годы
     try:
-        raw = fetch_monthly_for_years(base, tuple(sorted(sel_years)))
-    except requests.RequestException as e:
-        st.error(f"Ошибка загрузки: {e}")
+        if MODE == "db":
+            raw = db_get_monthly(db_url, tuple(sorted(sel_years)))
+        elif MODE == "api":
+            raw = api_get_monthly(api_url, tuple(sorted(sel_years)))
+        else:
+            raw = [r for r in _demo_data() if r["year"] in set(sel_years)]
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных: {e}")
         st.stop()
 
-    months_in_data = months_present_in_rows(raw)
-    if not months_in_data:
-        months_in_data = list(months_all)
+    months_in_data = sorted(
+        {r["month"] for r in raw if r.get("month")},
+        key=lambda m: MONTH_IDX.get(m, 99),
+    )
 
-    years_t = tuple(sorted(sel_years))
-    if st.session_state.get("_sync_years_t") != years_t:
-        st.session_state["_sync_years_t"] = years_t
-        prev_m = list(st.session_state.get("months_ms", []))
-        st.session_state["months_ms"] = [m for m in prev_m if m in months_in_data]
-
-    project_options = [p for p in PROJECT_ORDER if p in PROJECT_GROUPS]
+    # Проекты
     sel_projects = st.multiselect(
         "Проекты",
-        options=project_options,
+        [p for p in PROJECT_ORDER if p in PROJECT_GROUPS],
         default=[],
         key="projects_ms",
-        help="Филиалы проекта подставляются ниже; можно править вручную.",
+        help="Выберите проект — связанные филиалы подставятся ниже",
     )
-    expanded_from_projects: set[str] = set()
-    for pname in sel_projects:
-        expanded_from_projects |= expand_project_to_locations(pname, locations)
+    expanded_locs: set[str] = set()
+    for p in sel_projects:
+        expanded_locs |= expand_project(p, locations_avail)
 
-    proj_t = tuple(sorted(sel_projects))
-    if st.session_state.get("_sync_proj_t") != proj_t:
-        st.session_state["_sync_proj_t"] = proj_t
-        if sel_projects:
-            st.session_state["branches_ms"] = sorted(expanded_from_projects)
-        else:
-            st.session_state["branches_ms"] = []
+    proj_key = tuple(sorted(sel_projects))
+    if st.session_state.get("_proj_key") != proj_key:
+        st.session_state["_proj_key"] = proj_key
+        st.session_state["branches_ms"] = sorted(expanded_locs) if sel_projects else []
 
-    if sel_projects:
-        st.caption(f"От проектов: {len(expanded_from_projects)} филиалов")
+    if sel_projects and expanded_locs:
+        st.caption(f"Из проектов: {len(expanded_locs)} филиалов")
 
+    # Месяцы
     sel_months = st.multiselect(
         "Месяцы",
-        options=months_in_data,
-        format_func=month_label_ru,
+        months_in_data,
+        format_func=lambda m: MONTH_SHORT.get(m, m),
         key="months_ms",
-        help="Только месяцы с данными за выбранные годы. Пусто = все.",
+        help="Пусто = все месяцы",
     )
 
+    # Филиалы
     sel_locs_manual = st.multiselect(
         "Филиалы",
-        options=locations,
+        locations_avail,
         key="branches_ms",
-        help="Пусто при отсутствии проектов = все. С проектами — подставляются из проекта.",
+        help="Пусто = все филиалы",
     )
 
-effective_locs = set(sel_locs_manual)
-if sel_projects and not effective_locs:
-    sel_locs = sorted(expanded_from_projects)
-elif effective_locs:
-    sel_locs = sorted(effective_locs)
-else:
-    sel_locs = []
+# ── Применение фильтров ────────────────────────────────────────────────────────
+effective_locs: list[str] = []
+if sel_locs_manual:
+    effective_locs = list(sel_locs_manual)
+elif sel_projects:
+    effective_locs = sorted(expanded_locs)
 
-collapsed = collapse_by_month(raw, sel_locs)
+collapsed = collapse_by_month(raw, effective_locs)
 if sel_months:
-    collapsed = [d for d in collapsed if d.get("month") in sel_months]
+    collapsed = [d for d in collapsed if d.get("month") in set(sel_months)]
 
 agg = aggregate(collapsed)
 
+# ── KPI-карточки ──────────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Прибыль", fmt_kzt(agg["profit"]), f"{agg['profit_pct']}% от дохода")
-c2.metric("Доход", fmt_kzt(agg["total_income"]))
-c3.metric("Расходы", fmt_kzt(agg["expenses"]))
-c4.metric("Активы (среднее)", fmt_kzt(agg["total_assets"]))
+c1.metric("💰 Прибыль",        fmt_kzt(agg["profit"]),       f"{agg['profit_pct']:.1f}% от дохода")
+c2.metric("📈 Доход",          fmt_kzt(agg["total_income"]))
+c3.metric("📉 Расходы",        fmt_kzt(agg["expenses"]))
+c4.metric("🏦 Активы (среднее)", fmt_kzt(agg["total_assets"]))
 
 if not collapsed:
-    st.warning("Нет строк после фильтров.")
+    st.warning("Нет данных за выбранный период. Измените фильтры.")
     st.stop()
 
-chart_rows = []
-multi_year = len(set(d["year"] for d in collapsed)) > 1
+# ── Подготовка данных для графиков ────────────────────────────────────────────
+multi_year = len({d["year"] for d in collapsed}) > 1
+
+def period_label(d: dict) -> str:
+    short = MONTH_SHORT.get(d["month"], d["month"])
+    year_short = str(d["year"])[-2:]
+    return f"{year_short}/{short}" if multi_year else short
+
+
+chart_rows: list[dict] = []
+breakdown_rows: list[dict] = []
+margin_rows: list[dict] = []
+
 for d in collapsed:
-    label = (
-        f"{str(d['year'])[-2:]} {MONTH_SHORT.get(d['month'], d['month'])}"
-        if multi_year
-        else MONTH_SHORT.get(d["month"], d["month"])
-    )
-    chart_rows.append({"Период": label, "Прибыль": _num(d["profit"]), "Доход": _num(d["total_income"])})
+    p = period_label(d)
+    m = 1_000_000  # масштаб: миллионы тенге
 
-df = pd.DataFrame(chart_rows)
-st.subheader("Динамика")
-tab1, tab2 = st.tabs(["Прибыль", "Доход"])
+    chart_rows.append({
+        "Период":   p,
+        "Доход":    _num(d["total_income"]) / m,
+        "Расходы":  _num(d["expenses"])     / m,
+        "Прибыль":  _num(d["profit"])       / m,
+    })
+    breakdown_rows.append({
+        "Период":  p,
+        "Ломбард": _num(d["lombard_income"]) / m,
+        "Магазин": _num(d["store_income"])   / m,
+        "Прочее":  _num(d["other_income"])   / m,
+    })
+    margin_rows.append({
+        "Период":         p,
+        "Рентабельность": _num(d.get("profit_pct")),
+    })
+
+df_chart     = pd.DataFrame(chart_rows).set_index("Период")
+df_breakdown = pd.DataFrame(breakdown_rows).set_index("Период")
+df_margin    = pd.DataFrame(margin_rows).set_index("Период")
+
+# ── Графики ────────────────────────────────────────────────────────────────────
+st.subheader("📊 Графики")
+
+tab1, tab2, tab3 = st.tabs([
+    "Доход / Расходы / Прибыль",
+    "Структура доходов",
+    "Рентабельность %",
+])
+
 with tab1:
-    st.line_chart(df.set_index("Период")["Прибыль"])
-with tab2:
-    st.line_chart(df.set_index("Период")["Доход"])
+    st.caption("млн ₸ · хронологический порядок →")
+    st.line_chart(df_chart, color=["#4CAF50", "#F44336", "#2196F3"])
 
-with st.expander("Таблица (помесячно)"):
-    st.dataframe(pd.DataFrame(collapsed), use_container_width=True)
+with tab2:
+    st.caption("млн ₸ · структура по источникам")
+    st.bar_chart(df_breakdown)
+
+with tab3:
+    st.caption("% · чистая прибыль / доход")
+    st.bar_chart(df_margin)
+
+# ── Детальная таблица ──────────────────────────────────────────────────────────
+st.subheader("📋 Данные по месяцам")
+
+table_rows = []
+for d in collapsed:
+    short = MONTH_SHORT.get(d["month"], d["month"])
+    period = f"{d['year']} {short}" if multi_year else short
+    table_rows.append({
+        "Период":         period,
+        "Доход":          int(_num(d.get("total_income"))),
+        "Расходы":        int(_num(d.get("expenses"))),
+        "Прибыль":        int(_num(d.get("profit"))),
+        "Рент. %":        _num(d.get("profit_pct")),
+        "Активы":         int(_num(d.get("total_assets"))),
+        "Ломбард доход":  int(_num(d.get("lombard_income"))),
+        "Магазин доход":  int(_num(d.get("store_income"))),
+        "Прочий доход":   int(_num(d.get("other_income"))),
+    })
+
+# Итоговая строка
+if len(table_rows) > 1:
+    table_rows.append({
+        "Период":        "ИТОГО",
+        "Доход":         int(agg["total_income"]),
+        "Расходы":       int(agg["expenses"]),
+        "Прибыль":       int(agg["profit"]),
+        "Рент. %":       agg["profit_pct"],
+        "Активы":        int(agg["total_assets"]),
+        "Ломбард доход": int(agg["lombard_income"]),
+        "Магазин доход": int(agg["store_income"]),
+        "Прочий доход":  int(agg["other_income"]),
+    })
+
+df_table = pd.DataFrame(table_rows)
+
+money_cols = ["Доход", "Расходы", "Прибыль", "Активы", "Ломбард доход", "Магазин доход", "Прочий доход"]
+col_cfg: dict[str, Any] = {
+    c: st.column_config.NumberColumn(c, format="%d ₸") for c in money_cols
+}
+col_cfg["Рент. %"] = st.column_config.NumberColumn("Рент. %", format="%.1f %%")
+
+st.dataframe(
+    df_table,
+    use_container_width=True,
+    column_config=col_cfg,
+    hide_index=True,
+)
