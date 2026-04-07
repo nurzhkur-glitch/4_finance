@@ -463,11 +463,21 @@ if sel_months:
 agg = aggregate(collapsed)
 
 # ── KPI-карточки ──────────────────────────────────────────────────────────────
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("💰 Прибыль",        fmt_kzt(agg["profit"]),       f"{agg['profit_pct']:.1f}% от дохода")
-c2.metric("📈 Доход",          fmt_kzt(agg["total_income"]))
-c3.metric("📉 Расходы",        fmt_kzt(agg["expenses"]))
-c4.metric("🏦 Активы (среднее)", fmt_kzt(agg["total_assets"]))
+r1c1, r1c2 = st.columns(2)
+r1c1.metric("💰 Прибыль",  fmt_kzt(agg["profit"]),  f"{agg['profit_pct']:.1f}% от дохода")
+r1c2.metric("📉 Затраты",  fmt_kzt(agg["expenses"]))
+
+r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+r2c1.metric("🏦 Общий актив",     fmt_kzt(agg["total_assets"]))
+r2c2.metric("💎 Актив ломбарда",  fmt_kzt(agg["lombard_assets"]))
+r2c3.metric("🏪 Актив магазина",  fmt_kzt(agg["store_assets"]))
+r2c4.metric("🏧 Касса",           fmt_kzt(agg["cash"]))
+
+r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+r3c1.metric("💵 Общий доход",    fmt_kzt(agg["total_income"]))
+r3c2.metric("💎 Доход ломбарда", fmt_kzt(agg["lombard_income"]))
+r3c3.metric("🏪 Доход магазина", fmt_kzt(agg["store_income"]))
+r3c4.metric("📦 Прочий доход",   fmt_kzt(agg["other_income"]))
 
 if not collapsed:
     st.warning("Нет данных за выбранный период. Измените фильтры.")
