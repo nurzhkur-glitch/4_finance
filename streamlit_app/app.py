@@ -127,16 +127,12 @@ def _num(x: Any) -> float:
         return 0.0
 
 
-def fmt_kzt(n: float, decimals: int = 1) -> str:
-    sign = "-" if n < 0 else ""
-    x = abs(n)
-    if x >= 1e9:
-        return f"{sign}{x/1e9:.{decimals}f} млрд ₸"
-    if x >= 1e6:
-        return f"{sign}{x/1e6:.{decimals}f} млн ₸"
-    if x >= 1e3:
-        return f"{sign}{x/1e3:.0f} тыс ₸"
-    return f"{sign}{x:,.0f} ₸"
+def fmt_kzt(n: float) -> str:
+    """Полное число с пробелами как разделителями тысяч: 337 500 000"""
+    v = int(round(_num(n)))
+    if v < 0:
+        return "-" + f"{abs(v):,}".replace(",", "\u00a0")
+    return f"{v:,}".replace(",", "\u00a0")
 
 
 def normalize_key(s: str) -> str:
