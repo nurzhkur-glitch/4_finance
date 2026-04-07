@@ -539,47 +539,60 @@ with tab3:
 # ── Детальная таблица ──────────────────────────────────────────────────────────
 st.subheader("📋 Данные по месяцам")
 
+
+def _fmt(n: float) -> str:
+    """Число с пробелами как разделителями тысяч (123 456 789)."""
+    v = int(round(_num(n)))
+    if v < 0:
+        return "-" + f"{abs(v):,}".replace(",", "\u00a0")
+    return f"{v:,}".replace(",", "\u00a0")
+
+
+def _period_iso(d: dict) -> str:
+    """Формат периода: 2026-04"""
+    m_num = MONTH_IDX.get(d["month"], 0) + 1
+    return f"{d['year']}-{m_num:02d}"
+
+
+# Сортировка: свежие сверху (descending)
+table_data = sorted(collapsed, key=lambda r: (int(r["year"]), MONTH_IDX.get(r["month"], 99)), reverse=True)
+
 table_rows = []
-for d in collapsed:
-    short = MONTH_SHORT.get(d["month"], d["month"])
-    period = f"{d['year']} {short}" if multi_year else short
+for d in table_data:
     table_rows.append({
-        "Период":         period,
-        "Доход":          int(_num(d.get("total_income"))),
-        "Расходы":        int(_num(d.get("expenses"))),
-        "Прибыль":        int(_num(d.get("profit"))),
-        "Рент. %":        _num(d.get("profit_pct")),
-        "Активы":         int(_num(d.get("total_assets"))),
-        "Ломбард доход":  int(_num(d.get("lombard_income"))),
-        "Магазин доход":  int(_num(d.get("store_income"))),
-        "Прочий доход":   int(_num(d.get("other_income"))),
+        "Период":           _period_iso(d),
+        "Общий актив":      _fmt(d.get("total_assets")),
+        "Актив маг.+ломб.": _fmt(d.get("store_lombard_assets")),
+        "Актив ломб.":      _fmt(d.get("lombard_assets")),
+        "Актив маг.":       _fmt(d.get("store_assets")),
+        "Касса":            _fmt(d.get("cash")),
+        "Общий доход":      _fmt(d.get("total_income")),
+        "Доход ломб.":      _fmt(d.get("lombard_income")),
+        "Доход маг.":       _fmt(d.get("store_income")),
+        "Доход пр.":        _fmt(d.get("other_income")),
+        "Затраты":          _fmt(d.get("expenses")),
+        "Прибыль":          _fmt(d.get("profit")),
     })
 
 # Итоговая строка
 if len(table_rows) > 1:
     table_rows.append({
-        "Период":        "ИТОГО",
-        "Доход":         int(agg["total_income"]),
-        "Расходы":       int(agg["expenses"]),
-        "Прибыль":       int(agg["profit"]),
-        "Рент. %":       agg["profit_pct"],
-        "Активы":        int(agg["total_assets"]),
-        "Ломбард доход": int(agg["lombard_income"]),
-        "Магазин доход": int(agg["store_income"]),
-        "Прочий доход":  int(agg["other_income"]),
+        "Период":           "Итого",
+        "Общий актив":      _fmt(agg["total_assets"]),
+        "Актив маг.+ломб.": _fmt(agg["store_lombard_assets"]),
+        "Актив ломб.":      _fmt(agg["lombard_assets"]),
+        "Актив маг.":       _fmt(agg["store_assets"]),
+        "Касса":            _fmt(agg["cash"]),
+        "Общий доход":      _fmt(agg["total_income"]),
+        "Доход ломб.":      _fmt(agg["lombard_income"]),
+        "Доход маг.":       _fmt(agg["store_income"]),
+        "Доход пр.":        _fmt(agg["other_income"]),
+        "Затраты":          _fmt(agg["expenses"]),
+        "Прибыль":          _fmt(agg["profit"]),
     })
 
-df_table = pd.DataFrame(table_rows)
-
-money_cols = ["Доход", "Расходы", "Прибыль", "Активы", "Ломбард доход", "Магазин доход", "Прочий доход"]
-col_cfg: dict[str, Any] = {
-    c: st.column_config.NumberColumn(c, format="%d ₸") for c in money_cols
-}
-col_cfg["Рент. %"] = st.column_config.NumberColumn("Рент. %", format="%.1f %%")
-
 st.dataframe(
-    df_table,
+    pd.DataFrame(table_rows),
     use_container_width=True,
-    column_config=col_cfg,
     hide_index=True,
 )
