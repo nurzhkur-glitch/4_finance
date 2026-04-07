@@ -517,30 +517,88 @@ for d in collapsed:
         "Рентабельность": _num(d.get("profit_pct")),
     })
 
-df_chart     = pd.DataFrame(chart_rows).set_index("Период")
-df_breakdown = pd.DataFrame(breakdown_rows).set_index("Период")
-df_margin    = pd.DataFrame(margin_rows).set_index("Период")
+periods     = [r["Период"]  for r in chart_rows]
+income_vals = [r["Доход"]   for r in chart_rows]
+expense_vals= [r["Расходы"] for r in chart_rows]
+lombard_vals= [r["Ломбард"] for r in breakdown_rows]
+store_vals  = [r["Магазин"] for r in breakdown_rows]
+other_vals  = [r["Прочее"]  for r in breakdown_rows]
+
+def _fmt_hover(v_mln: float) -> str:
+    n = int(round(v_mln * 1_000_000))
+    return f"{n:,}".replace(",", "\u00a0")
 
 # ── Графики ────────────────────────────────────────────────────────────────────
+import plotly.graph_objects as go
+
 st.subheader("📊 Графики")
+gcol1, gcol2 = st.columns([3, 2])
 
-tab1, tab2, tab3 = st.tabs([
-    "Доход / Расходы / Прибыль",
-    "Структура доходов",
-    "Рентабельность %",
-])
+# ---- График 1: Доходы vs Расходы (area chart) --------------------------------
+with gcol1:
+    fig1 = go.Figure()
+    fig1.add_trace(go.Scatter(
+        x=periods, y=income_vals,
+        name="Доход",
+        fill="tozeroy",
+        mode="lines",
+        line=dict(color="#4CAF50", width=2),
+        fillcolor="rgba(76,175,80,0.25)",
+        customdata=[_fmt_hover(v) for v in income_vals],
+        hovertemplate="Доход: <b>%{customdata}</b><extra></extra>",
+    ))
+    fig1.add_trace(go.Scatter(
+        x=periods, y=expense_vals,
+        name="Расходы",
+        fill="tozeroy",
+        mode="lines",
+        line=dict(color="#F44336", width=2),
+        fillcolor="rgba(244,67,54,0.25)",
+        customdata=[_fmt_hover(v) for v in expense_vals],
+        hovertemplate="Расходы: <b>%{customdata}</b><extra></extra>",
+    ))
+    fig1.update_layout(
+        title=dict(text="ДОХОДЫ VS РАСХОДЫ ПО МЕСЯЦАМ", font=dict(size=12, color="#aaaaaa")),
+        template="plotly_dark",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        legend=dict(orientation="h", y=-0.15),
+        hovermode="x unified",
+        margin=dict(l=10, r=10, t=40, b=10),
+        yaxis=dict(ticksuffix=" млн", gridcolor="#222222"),
+        xaxis=dict(gridcolor="#222222"),
+        height=380,
+    )
+    st.plotly_chart(fig1, use_container_width=True)
 
-with tab1:
-    st.caption("млн ₸ · хронологический порядок →")
-    st.line_chart(df_chart, color=["#4CAF50", "#F44336", "#2196F3"])
+# ---- График 2: Структура дохода (donut chart) --------------------------------
+with gcol2:
+    lombard_total = sum(lombard_vals)
+    store_total   = sum(store_vals)
+    other_total   = sum(other_vals)
 
-with tab2:
-    st.caption("млн ₸ · структура по источникам")
-    st.bar_chart(df_breakdown)
-
-with tab3:
-    st.caption("% · чистая прибыль / доход")
-    st.bar_chart(df_margin)
+    fig2 = go.Figure(go.Pie(
+        labels=["Ломбард", "Магазин", "Прочее"],
+        values=[lombard_total, store_total, other_total],
+        hole=0.55,
+        marker=dict(colors=["#2196F3", "#4CAF50", "#FF9800"]),
+        textinfo="none",
+        hovertemplate="%{label}: <b>%{value:.1f} млн</b> (%{percent})<extra></extra>",
+    ))
+    fig2.update_layout(
+        title=dict(text="СТРУКТУРА ДОХОДА", font=dict(size=12, color="#aaaaaa")),
+        template="plotly_dark",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        legend=dict(orientation="v", x=0.0, y=0.5, font=dict(size=12)),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=380,
+        annotations=[dict(
+            text=f"{lombard_total + store_total + other_total:.0f}<br>млн ₸",
+            x=0.5, y=0.5, font_size=14, showarrow=False, font_color="white",
+        )],
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
 # ── Детальная таблица ──────────────────────────────────────────────────────────
 st.subheader("📋 Данные по месяцам")
